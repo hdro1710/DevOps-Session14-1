@@ -1,0 +1,127 @@
+1. Cấu hình Docker Compose
+Bổ sung service grafana vào file compose.yaml hiện tại:
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    networks:
+      - default
+      - monitoring
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    restart: unless-stopped
+    pid: host
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host/root:ro,rslave
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--path.rootfs=/host/root"
+      - "--collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|var/lib/kubelet/.+)($$|/)"
+    networks:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - monitoring
+
+volumes:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  default:
+  monitoring:
+    external: true
+    name: monitoring
+
+Lưu ý về port: Trong cấu hình trên, Grafana sử dụng host port 3001 vì dummy-frontend đang chiếm port 3000. Cổng 3000 bên trong container Grafana vẫn được giữ nguyên. Nếu đề bài bắt buộc sử dụng host port 3000, cần chuyển dummy-frontend sang port host khác trước.
+
+Sau khi cấu hình, có thể kiểm tra cú pháp và trạng thái dịch vụ bằng:
+sudo docker compose config
+sudo docker compose up -d grafana
+sudo docker compose ps
+
+2. Các bước cấu hình Prometheus Data Source
+Sau khi truy cập giao diện Grafana, thực hiện các bước sau:
+1. Mở Connections → Data sources.
+2. Chọn Add data source.
+3. Chọn loại nguồn dữ liệu Prometheus.
+4. Tại trường Prometheus server URL, nhập:
+   http://prometheus:9090
+5. Nhấn Save & test để kiểm tra kết nối.
+Nếu cấu hình mạng chính xác, Grafana sẽ truy cập được Prometheus thông qua mạng Docker nội bộ.
+3. Giải thích: Vì sao sử dụng prometheus:9090 thay vì localhost:9090?
+3.1. Bản chất của localhost
+localhost là địa chỉ loopback, trỏ về chính môi trường mạng của tiến trình đang thực hiện kết nối.
+
+Trong kiến trúc Docker Compose, Grafana và Prometheus chạy trong hai container riêng biệt. Do đó, khi Grafana gửi yêu cầu đến:
+http://localhost:9090
+
+yêu cầu sẽ hướng đến cổng 9090 bên trong container Grafana, chứ không phải container Prometheus.
+
+Vì Prometheus không chạy trong container Grafana nên kết nối này thường thất bại.
+3.2. Cơ chế DNS nội bộ của Docker Compose
+Docker Compose cung cấp cơ chế phân giải tên service cho các container cùng tham gia một mạng Docker.
+
+Trong cấu hình trên:
+- Prometheus có tên service là prometheus.
+- Grafana và Prometheus cùng tham gia mạng monitoring.
+- Prometheus lắng nghe tại cổng 9090 bên trong container.
+Vì vậy, Grafana có thể sử dụng tên service prometheus làm hostname để kết nối đến Prometheus:
+http://prometheus:9090
+
+Docker DNS sẽ phân giải tên prometheus thành địa chỉ IP nội bộ của container tương ứng. Grafana sau đó kết nối trực tiếp qua mạng Docker.
+3.3. Sơ đồ kiến trúc kết nối
+                  Người dùng
+                      |
+                      | HTTP :3001
+                      v
+             +-------------------+
+             |  Grafana          |
+             |  Container        |
+             |  Port 3000        |
+             +-------------------+
+                      |
+                      | http://prometheus:9090
+                      |
+              Docker network
+                "monitoring"
+                      |
+                      v
+             +-------------------+
+             |  Prometheus       |
+             |  Container        |
+             |  Port 9090        |
+             +-------------------+
+
+Lưu ý: Port mapping 127.0.0.1:9090:9090 của Prometheus chỉ giới hạn truy cập thông qua địa chỉ loopback của host. Nó không ngăn Grafana truy cập cổng 9090 của Prometheus qua mạng Docker nội bộ.
+4. Kết luận
+Prometheus và Grafana là hai dịch vụ chạy trong các container độc lập. Khi cả hai cùng tham gia một mạng Docker, Grafana nên sử dụng tên service prometheus để truy cập Prometheus qua DNS nội bộ.
+
+Sử dụng http://prometheus:9090 có các ưu điểm:
+- Đúng kiến trúc mạng: kết nối trực tiếp giữa các container.
+- Không phụ thuộc IP nội bộ: Docker quản lý việc phân giải tên service.
+- Tăng tính bảo mật: không cần công khai cổng Prometheus ra Internet để Grafana truy cập.
+- Dễ bảo trì: cấu hình không cần thay đổi khi địa chỉ IP nội bộ của container thay đổi.
+Vì vậy, với kiến trúc Docker Compose của bài lab, URL phù hợp trong cấu hình Prometheus Data Source của Grafana là http://prometheus:9090, không phải http://localhost:9090.
